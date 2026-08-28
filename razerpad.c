@@ -29,7 +29,11 @@
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
+#include <IOKit/IOMessage.h>
 #include <IOKit/hid/IOHIDManager.h>
+#include <IOKit/ps/IOPSKeys.h>
+#include <IOKit/ps/IOPowerSources.h>
+#include <IOKit/pwr_mgt/IOPMLib.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -420,6 +424,67 @@ static int led_apply_spec(const char *spec, const char *color_hex) {
     return -3; /* unknown spec */
 }
 
+/* ───────────────────────── System power (sleep/wake) ────────────────────── */
+
+static volatile sig_atomic_t g_running = 1;
+static void on_signal(int sig) {
+    (void)sig;
+    g_running = 0;
+}
+
+static io_connect_t g_pm_root_port = 0;
+static IONotificationPortRef g_pm_notify_port = NULL;
+static io_object_t g_pm_notifier = 0;
+static volatile sig_atomic_t g_just_woke = 0;
+
+static void power_callback(void *refcon, io_service_t service,
+                           natural_t msg, void *arg) {
+    (void)refcon;
+    (void)service;
+    switch (msg) {
+    case kIOMessageCanSystemSleep:
+        IOAllowPowerChange(g_pm_root_port, (long)arg);
+        break;
+    case kIOMessageSystemWillSleep:
+        /* stop the pad so it doesn't spin at the last speed all night */
+        if (g_pad)
+            pad_release();
+        IOAllowPowerChange(g_pm_root_port, (long)arg);
+        break;
+    case kIOMessageSystemHasPoweredOn:
+        g_just_woke = 1;
+        break;
+    }
+}
+
+static void power_init(void) {
+    g_pm_root_port = IORegisterForSystemPower(NULL, &g_pm_notify_port,
+                                              power_callback, &g_pm_notifier);
+    if (g_pm_root_port)
+        CFRunLoopAddSource(CFRunLoopGetCurrent(),
+                           IONotificationPortGetRunLoopSource(g_pm_notify_port),
+                           kCFRunLoopDefaultMode);
+}
+
+/* Sleep while pumping the run loop so power notifications are delivered. */
+static void idle_wait(double secs) {
+    CFAbsoluteTime end = CFAbsoluteTimeGetCurrent() + secs;
+    while (g_running && !g_just_woke && CFAbsoluteTimeGetCurrent() < end)
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, false);
+}
+
+/* True when running on battery power. */
+static int on_battery(void) {
+    CFTypeRef info = IOPSCopyPowerSourcesInfo();
+    if (!info)
+        return 0;
+    CFStringRef type = IOPSGetProvidingPowerSourceType(info);
+    int batt = type && CFStringCompare(type, CFSTR(kIOPMBatteryPowerKey), 0) ==
+                           kCFCompareEqualTo;
+    CFRelease(info);
+    return batt;
+}
+
 /* ─────────────────────────── Fan curve & config ─────────────────────────── */
 
 typedef struct {
@@ -566,12 +631,6 @@ static void led_apply_config(void) {
 
 /* ────────────────────────────── Main / loop ─────────────────────────────── */
 
-static volatile sig_atomic_t g_running = 1;
-static void on_signal(int sig) {
-    (void)sig;
-    g_running = 0;
-}
-
 static void log_line(const char *fmt, ...) {
     char ts[32];
     time_t now = time(NULL);
@@ -695,6 +754,7 @@ int main(int argc, char **argv) {
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
+    power_init();
 
     config_poll();
     log_line("razerpad starting: interval=%.1fs, config=%s", g_interval,
@@ -707,6 +767,13 @@ int main(int argc, char **argv) {
     int cycles_since_send = 0;
 
     while (g_running) {
+        if (g_just_woke) {
+            g_just_woke = 0;
+            log_line("Woke from sleep — re-taking fan control");
+            pad_close(); /* device refs may be stale after sleep */
+            last_rpm = -1;
+        }
+
         if (config_poll()) {
             log_line("config reloaded");
             last_rpm = -1; /* re-send fan speed */
@@ -725,8 +792,7 @@ int main(int argc, char **argv) {
                     was_connected = 0;
                 }
                 status_write(cpu_temp(), 0, 0);
-                for (int i = 0; i < 10 && g_running; i++)
-                    usleep(500000);
+                idle_wait(5.0);
                 continue;
             }
         }
@@ -758,11 +824,7 @@ int main(int argc, char **argv) {
             status_write(temp, last_rpm > 0 ? last_rpm : 0, 1);
         }
 
-        double slept = 0;
-        while (slept < g_interval && g_running) {
-            usleep(250000);
-            slept += 0.25;
-        }
+        idle_wait(g_interval);
     }
 
     if (g_pad) {
