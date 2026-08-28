@@ -503,6 +503,10 @@ static char g_led_effect[16] = "";  /* empty = don't touch lighting */
 static char g_led_color[8] = "00ff00";
 static int g_led_bright = -1;
 
+/* Fan modifiers from config */
+static int g_battery_quiet = 0;   /* % to shave off the curve on battery */
+static char g_override[8] = "";   /* "", "max", or "quiet" */
+
 static double curve_percent(double temp) {
     if (temp <= g_curve[0].temp)
         return g_curve[0].percent;
@@ -590,11 +594,18 @@ static int config_poll(void) {
                 snprintf(g_led_color, sizeof(g_led_color), "%s", val);
         } else if (!strcmp(key, "brightness")) {
             g_led_bright = atoi(val);
+        } else if (!strcmp(key, "battery_quiet")) {
+            int v = atoi(val);
+            g_battery_quiet = v < 0 ? 0 : v > 90 ? 90 : v;
+        } else if (!strcmp(key, "override")) {
+            snprintf(g_override, sizeof(g_override), "%s", val);
         }
     }
     fclose(f);
     return 1;
 }
+
+static int g_on_battery_now = 0;
 
 static void status_write(double temp, int rpm, int connected) {
     char tmp[600];
@@ -604,6 +615,8 @@ static void status_write(double temp, int rpm, int connected) {
         return;
     fprintf(f, "{\"ts\":%ld,\"connected\":%s,\"temp\":%.1f,\"rpm\":%d,",
             (long)time(NULL), connected ? "true" : "false", temp, rpm);
+    fprintf(f, "\"power\":\"%s\",\"battery_quiet\":%d,\"override\":\"%s\",",
+            g_on_battery_now ? "battery" : "ac", g_battery_quiet, g_override);
     fprintf(f, "\"interval\":%.1f,\"led\":\"%s\",\"led_color\":\"%s\","
                "\"brightness\":%d,\"curve\":\"",
             g_interval, g_led_effect[0] ? g_led_effect : "unmanaged",
@@ -800,6 +813,13 @@ int main(int argc, char **argv) {
         double temp = cpu_temp();
         if (temp >= 0) {
             double pct = curve_percent(temp);
+            g_on_battery_now = on_battery();
+            if (g_on_battery_now && g_battery_quiet > 0)
+                pct = pct * (100 - g_battery_quiet) / 100.0;
+            if (!strcmp(g_override, "max"))
+                pct = 100;
+            else if (!strcmp(g_override, "quiet") && pct > 25)
+                pct = 25;
             int rpm = percent_to_rpm(pct);
             /* hysteresis: ignore single-step (50 RPM) wobble from sensor noise */
             if (last_rpm >= 0 && abs(rpm - last_rpm) <= 50)

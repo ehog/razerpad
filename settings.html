@@ -46,6 +46,11 @@
             <label>seconds</label>
           </div>
           <div class="row">
+            <label for="battQuiet">On battery, run fans quieter by</label>
+            <input type="number" id="battQuiet" min="0" max="90" step="5">
+            <label>%</label>
+          </div>
+          <div class="row">
             <button class="btn btn-primary" id="applyFan">Save fan settings</button>
             <span class="msg" id="fanMsg"></span>
           </div>
@@ -142,6 +147,7 @@ let loaded = false;
 function loadConfig(cfg) {
   curvePts = parseCurveStr(cfg.curve || "40:0,60:15,75:25,85:40,93:65,98:100");
   $("interval").value = cfg.interval || "3";
+  $("battQuiet").value = cfg.battery_quiet || "0";
   const effects = ["off", "static", "spectrum", "wave", "wave2", "breath", "unmanaged"];
   $("led").value = effects.includes(cfg.led) ? cfg.led : "unmanaged";
   if (cfg.led_color) $("ledColor").value = "#" + cfg.led_color;
@@ -155,7 +161,8 @@ $("applyFan").onclick = async () => {
   /* round stored °C to one decimal so °F edits don't produce long fractions */
   const pts = curvePts.map(([t, p]) => [Math.round(t * 10) / 10, p]);
   try {
-    const j = await apiConfig({ curve: pts, interval: +$("interval").value });
+    const j = await apiConfig({ curve: pts, interval: +$("interval").value,
+                                battery_quiet: +$("battQuiet").value });
     flash($("fanMsg"), j.ok, j.ok ? "Saved — applies within a few seconds" : j.error);
   } catch (e) { flash($("fanMsg"), false, "Server unreachable"); }
 };

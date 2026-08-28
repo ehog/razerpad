@@ -100,6 +100,17 @@ def validate(body):
             return None, "brightness must be 0-100"
         cfg["brightness"] = str(b)
 
+    if "battery_quiet" in body:
+        b = int(body["battery_quiet"])
+        if not 0 <= b <= 90:
+            return None, "battery_quiet must be 0-90"
+        cfg["battery_quiet"] = str(b)
+
+    if "override" in body:
+        if body["override"] not in ("off", "max", "quiet"):
+            return None, "override must be off, max, or quiet"
+        cfg["override"] = body["override"]
+
     return cfg, None
 
 
