@@ -1,9 +1,22 @@
 # razerpad-mac
 
+[![build](https://github.com/ehog/razerpad-mac/actions/workflows/build.yml/badge.svg)](https://github.com/ehog/razerpad-mac/actions/workflows/build.yml)
+
 Automatic fan-speed regulation **and Chroma lighting control** for the
-**Razer Laptop Cooling Pad** on macOS (Intel Macs). Replicates what Razer
-Synapse does on Windows: reads the CPU die temperature and continuously adjusts
-the pad's fan speed along a fan curve. Includes a local web dashboard.
+**Razer Laptop Cooling Pad** on macOS. Replicates what Razer Synapse does on
+Windows: reads the CPU die temperature and continuously adjusts the pad's fan
+speed along a fan curve. Includes a local web dashboard and a menu bar app.
+
+Highlights:
+
+- Fan curve with hysteresis, hot-plug recovery, sleep/wake handling
+  (releases the pad on sleep so it doesn't spin all night)
+- Chroma lighting: static / spectrum / wave / breathing / **reactive**
+  (color tracks CPU temperature, green → red)
+- Quieter-on-battery option and Auto / Quiet / Max-cool override modes
+- Web dashboard (Razer-styled, localhost-only) with live charts,
+  persistent thermal history (1h/24h/7d + stats), curve editor, °C/°F
+- Menu bar readout with a fan mode switcher
 
 Single dependency-free C binary using IOKit:
 
@@ -32,7 +45,19 @@ make            # build ./razerpad
 make install    # copy to /usr/local/bin
 make agent      # install + start the launchd login agent (auto-run)
 make unagent    # stop and remove the login agent
+make bar        # build + start the menu bar app (razerpadbar)
+make unbar      # stop and remove the menu bar app
 ```
+
+Or via Homebrew:
+
+```sh
+brew install ehog/tap/razerpad
+brew services start razerpad     # run the fan-curve daemon at login
+```
+
+(The dashboard and menu bar app are set up from a git checkout with
+`make dashboard` / `make bar`.)
 
 The agent (`com.razerpad.fancurve`) runs at login, survives pad hot-plugging,
 and logs to `/tmp/razerpad.log`.
@@ -79,11 +104,33 @@ Two pages with a Razer-inspired dark design system (`style.css`):
 `make undashboard` removes it.
 
 Plumbing: the daemon writes live status to `/tmp/razerpad-status.json` each
-cycle and hot-reloads `~/.config/razerpad/config` (key=value: `interval`,
-`curve`, `led`, `led_color`, `brightness`) when it changes; the dashboard reads
-the former and writes the latter. LED settings from the config are re-applied
-on config change and whenever the pad reconnects. Set `led=unmanaged` to leave
-lighting alone entirely.
+cycle and hot-reloads `~/.config/razerpad/config` (key=value) when it changes;
+the dashboard reads the former and writes the latter. LED settings from the
+config are re-applied on config change and whenever the pad reconnects. Set
+`led=unmanaged` to leave lighting alone entirely.
+
+Config keys: `interval`, `curve`, `led` (effects above plus `reactive`),
+`led_color`, `brightness`, `battery_quiet` (0–90, % shaved off the curve on
+battery), `override` (`off`/`quiet`/`max` — what the menu bar app switches),
+`temp_cmd` (optional shell command printing °C, used instead of the SMC —
+config-file only, not settable via the web API).
+
+Thermal history is appended to `~/.config/razerpad/history.csv` (30-second
+averages, bounded at ~2 MB).
+
+## Menu bar app
+
+`make bar` builds and starts **razerpadbar**: live `temp° RPM` in the menu
+bar, with Auto / Quiet (cap 25%) / Max cool switching and a shortcut to the
+dashboard. It talks to the daemon through the same status/config files.
+
+## Apple Silicon
+
+The fan/lighting HID side works on any Mac. The built-in temperature reader is
+Intel-SMC only; on Apple Silicon set `temp_cmd` in the config to any command
+that prints the CPU temperature in °C, e.g. a `powermetrics`- or
+`osx-cpu-temp`-based helper. A native Apple Silicon sensor path would be a
+welcome contribution.
 
 Default curve: 40 °C → 0 %, 60 → 15, 75 → 25, 85 → 40, 93 → 65, 98 → 100
 (percent maps linearly onto 500–3200 RPM). The top end is intentionally flat —
