@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>razerpad — settings</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<nav>
+  <div class="brand">RAZER<b>PAD</b></div>
+  <div class="tabs">
+    <a href="/">Dashboard</a>
+    <a href="/settings" class="active">Settings</a>
+  </div>
+  <div class="conn" id="conn"><span class="dot"></span><span id="connText">connecting…</span></div>
+</nav>
+
+<div class="wrap">
+  <div class="grid">
+
+    <div class="card span2">
+      <h2>Display</h2>
+      <div class="row">
+        <label>Temperature unit</label>
+        <div class="seg" role="group" aria-label="Temperature unit">
+          <button id="unitC">°C</button>
+          <button id="unitF">°F</button>
+        </div>
+        <span class="footnote" style="margin:0">Display only — saved in this browser.</span>
+      </div>
+    </div>
+
+    <div class="card span2">
+      <h2>Fan</h2>
+      <div class="curvegrid">
+        <div class="stack">
+          <div>
+            <label>Curve points (temperature → fan %)</label>
+            <div class="pts" id="pts"></div>
+            <button class="btn btn-ghost" id="addPt">+ add point</button>
+          </div>
+          <div class="row">
+            <label for="interval">Poll interval</label>
+            <input type="number" id="interval" min="0.5" max="60" step="0.5">
+            <label>seconds</label>
+          </div>
+          <div class="row">
+            <button class="btn btn-primary" id="applyFan">Save fan settings</button>
+            <span class="msg" id="fanMsg"></span>
+          </div>
+        </div>
+        <div>
+          <div class="chartbox"><canvas id="curveCanvas" class="tall"></canvas></div>
+          <div class="footnote">Fan range is 500–3200 RPM; 0% is the quiet floor,
+            100% is full speed.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card span2">
+      <h2>Lighting</h2>
+      <div class="stack">
+        <div class="row">
+          <label for="led">Effect</label>
+          <select id="led">
+            <option value="unmanaged">Unmanaged (leave as-is)</option>
+            <option value="off">Off</option>
+            <option value="static">Static color</option>
+            <option value="spectrum">Spectrum cycle</option>
+            <option value="wave">Wave →</option>
+            <option value="wave2">Wave ←</option>
+            <option value="breath">Breathing</option>
+          </select>
+          <label for="ledColor" id="colorLabel">Color</label>
+          <input type="color" id="ledColor" value="#00ff00">
+        </div>
+        <div class="row">
+          <label for="bright">Brightness</label>
+          <input type="range" id="bright" min="0" max="100" value="80">
+          <span id="brightVal" style="font-variant-numeric:tabular-nums; min-width:38px">80%</span>
+        </div>
+        <div class="row">
+          <button class="btn btn-primary" id="applyLed">Save lighting</button>
+          <span class="msg" id="ledMsg"></span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="/app.js"></script>
+<script>
+"use strict";
+let curvePts = [];   /* always stored in °C */
+let lastStatus = null;
+const curve = curveChart($("curveCanvas"));
+
+/* ── unit segmented control ── */
+function refreshUnitUI() {
+  const u = Unit.get();
+  $("unitC").className = u === "c" ? "active" : "";
+  $("unitF").className = u === "f" ? "active" : "";
+  renderPts();
+  curve.redraw();
+}
+$("unitC").onclick = () => Unit.set("c");
+$("unitF").onclick = () => Unit.set("f");
+document.addEventListener("unitchange", refreshUnitUI);
+
+/* ── curve editor (inputs shown in the display unit, stored °C) ── */
+function renderPts() {
+  const box = $("pts");
+  box.innerHTML = "";
+  curvePts.forEach((pt, i) => {
+    const row = document.createElement("div");
+    row.className = "pt";
+    row.innerHTML =
+      `<input type="number" step="1" value="${Math.round(Unit.disp(pt[0]))}">
+       <span>${Unit.label()} →</span>
+       <input type="number" min="0" max="100" value="${pt[1]}"><span>%</span>
+       <button class="btn-ghost" title="Remove point">×</button>`;
+    const [ti, pi] = row.querySelectorAll("input");
+    ti.oninput = () => { curvePts[i][0] = Unit.fromDisp(+ti.value); curve.set(curvePts); };
+    pi.oninput = () => { curvePts[i][1] = +pi.value; curve.set(curvePts); };
+    row.querySelector("button").onclick = () => {
+      if (curvePts.length > 2) { curvePts.splice(i, 1); renderPts(); curve.set(curvePts); }
+    };
+    box.appendChild(row);
+  });
+}
+$("addPt").onclick = () => {
+  const last = curvePts[curvePts.length - 1] || [50, 50];
+  curvePts.push([Math.min(last[0] + 5, 110), Math.min(last[1] + 10, 100)]);
+  renderPts();
+  curve.set(curvePts);
+};
+
+/* ── load config once, save on demand ── */
+let loaded = false;
+function loadConfig(cfg) {
+  curvePts = parseCurveStr(cfg.curve || "40:0,60:15,75:25,85:40,93:65,98:100");
+  $("interval").value = cfg.interval || "3";
+  const effects = ["off", "static", "spectrum", "wave", "wave2", "breath", "unmanaged"];
+  $("led").value = effects.includes(cfg.led) ? cfg.led : "unmanaged";
+  if (cfg.led_color) $("ledColor").value = "#" + cfg.led_color;
+  $("bright").value = cfg.brightness >= 0 ? cfg.brightness : 80;
+  $("brightVal").textContent = $("bright").value + "%";
+  renderPts();
+  curve.set(curvePts);
+}
+
+$("applyFan").onclick = async () => {
+  /* round stored °C to one decimal so °F edits don't produce long fractions */
+  const pts = curvePts.map(([t, p]) => [Math.round(t * 10) / 10, p]);
+  try {
+    const j = await apiConfig({ curve: pts, interval: +$("interval").value });
+    flash($("fanMsg"), j.ok, j.ok ? "Saved — applies within a few seconds" : j.error);
+  } catch (e) { flash($("fanMsg"), false, "Server unreachable"); }
+};
+
+$("applyLed").onclick = async () => {
+  try {
+    const j = await apiConfig({
+      led: $("led").value,
+      led_color: $("ledColor").value,
+      brightness: +$("bright").value,
+    });
+    flash($("ledMsg"), j.ok, j.ok ? "Saved — applies within a few seconds" : j.error);
+  } catch (e) { flash($("ledMsg"), false, "Server unreachable"); }
+};
+$("bright").oninput = () => { $("brightVal").textContent = $("bright").value + "%"; };
+$("led").onchange = () => {
+  const needsColor = ["static", "breath"].includes($("led").value);
+  $("ledColor").style.display = needsColor ? "" : "none";
+  $("colorLabel").style.display = needsColor ? "" : "none";
+};
+
+/* ── status poll (nav pill + operating point on the preview) ── */
+async function poll() {
+  let status = null;
+  try {
+    const j = await apiStatus();
+    status = j.status;
+    lastStatus = status;
+    if (!loaded) { loadConfig(j.config); loaded = true; $("led").onchange(); }
+    curve.set(curvePts, status);
+  } catch (e) {}
+  renderConn(status);
+}
+
+refreshUnitUI();
+poll();
+setInterval(poll, 3000);
+window.addEventListener("resize", () => curve.redraw());
+</script>
+</body>
+</html>

@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>razerpad — dashboard</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<nav>
+  <div class="brand">RAZER<b>PAD</b></div>
+  <div class="tabs">
+    <a href="/" class="active">Dashboard</a>
+    <a href="/settings">Settings</a>
+  </div>
+  <div class="conn" id="conn"><span class="dot"></span><span id="connText">connecting…</span></div>
+</nav>
+
+<div class="wrap">
+  <div class="grid">
+    <div class="card tile">
+      <h2>CPU temperature</h2>
+      <div class="stat">
+        <span id="tempNow">–</span>
+        <small><button class="unit-flip" id="unitFlip"
+          title="Switch temperature unit">°C</button></small>
+      </div>
+      <div class="meter"><i id="tempMeter" style="width:0"></i></div>
+    </div>
+
+    <div class="card tile">
+      <h2>Fan speed</h2>
+      <div class="stat"><span id="rpmNow">–</span><small> RPM</small></div>
+      <div class="meter fan"><i id="rpmMeter" style="width:0"></i></div>
+    </div>
+
+    <div class="card">
+      <h2>Temperature history</h2>
+      <div class="chartbox"><canvas id="tempChart"></canvas><div class="tip" id="tempTip"></div></div>
+    </div>
+
+    <div class="card">
+      <h2>Fan speed history</h2>
+      <div class="chartbox"><canvas id="rpmChart"></canvas><div class="tip" id="rpmTip"></div></div>
+    </div>
+
+    <div class="card span2">
+      <h2>Fan curve <span class="hint"><a href="/settings">edit in settings</a></span></h2>
+      <div class="chartbox"><canvas id="curveCanvas" class="tall"></canvas></div>
+      <div class="footnote">Fan speed follows CPU temperature along this curve.
+        The green marker is the current operating point.</div>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+<script>
+"use strict";
+const history = []; // {ts, tempC, rpm}
+const MAX_HIST = 300;
+let lastTs = 0;
+let curvePts = [];
+let lastStatus = null;
+
+const tempChart = lineChart($("tempChart"), $("tempTip"), "--temp",
+  { fmt: v => v.toFixed(0) + "°" });
+const rpmChart = lineChart($("rpmChart"), $("rpmTip"), "--fan",
+  { ymin: 0, ymax: 3300, fmt: v => (v / 1000).toFixed(1) + "k" });
+const curve = curveChart($("curveCanvas"));
+
+function refreshUnitUI() {
+  $("unitFlip").textContent = Unit.label();
+  if (lastStatus && lastStatus.temp > 0)
+    $("tempNow").textContent = Unit.disp(lastStatus.temp).toFixed(1);
+  redrawCharts();
+  curve.redraw();
+}
+$("unitFlip").onclick = () => Unit.toggle();
+document.addEventListener("unitchange", refreshUnitUI);
+
+function redrawCharts() {
+  if (!history.length) return;
+  const t0 = history[0].ts;
+  const fmtT = ts => new Date(ts * 1000).toLocaleTimeString();
+  tempChart.set(history.map(h => ({
+    x: h.ts - t0, y: Unit.disp(h.tempC),
+    label: `${fmtT(h.ts)} — ${Unit.disp(h.tempC).toFixed(1)} ${Unit.label()}`,
+  })));
+  rpmChart.set(history.map(h => ({
+    x: h.ts - t0, y: h.rpm, label: `${fmtT(h.ts)} — ${h.rpm} RPM`,
+  })));
+}
+
+async function poll() {
+  let status = null;
+  try {
+    const j = await apiStatus();
+    status = j.status;
+    lastStatus = status;
+    curvePts = parseCurveStr(j.config.curve);
+  } catch (e) { /* server unreachable */ }
+  renderConn(status);
+  if (!status || status.stale || status.temp <= 0) return;
+
+  $("tempNow").textContent = Unit.disp(status.temp).toFixed(1);
+  $("rpmNow").textContent = status.connected ? status.rpm : "—";
+  $("tempMeter").style.width =
+    Math.min(Math.max((status.temp - 30) / 70 * 100, 0), 100) + "%";
+  $("rpmMeter").style.width =
+    (status.connected ? status.rpm / 3200 * 100 : 0) + "%";
+
+  if (status.ts !== lastTs) {
+    lastTs = status.ts;
+    history.push({ ts: status.ts, tempC: status.temp, rpm: status.rpm });
+    if (history.length > MAX_HIST) history.shift();
+    redrawCharts();
+    curve.set(curvePts, status);
+  }
+}
+
+refreshUnitUI();
+poll();
+setInterval(poll, 2000);
+window.addEventListener("resize", () => { redrawCharts(); curve.redraw(); });
+</script>
+</body>
+</html>
