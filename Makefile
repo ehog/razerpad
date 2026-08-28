@@ -24,6 +24,23 @@ unagent:
 	launchctl unload $(AGENT) 2>/dev/null || true
 	rm -f $(AGENT)
 
+razerpadbar: razerpadbar.swift
+	swiftc -O razerpadbar.swift -o razerpadbar
+
+BAR_PLIST = com.razerpad.menubar.plist
+BAR_AGENT = $(HOME)/Library/LaunchAgents/$(BAR_PLIST)
+
+# Install + start the menu bar app (temp/RPM readout, fan mode switcher)
+bar: razerpadbar
+	install -m 755 razerpadbar $(PREFIX)/bin/razerpadbar
+	sed "s|@BIN@|$(PREFIX)/bin/razerpadbar|" $(BAR_PLIST).in > $(BAR_AGENT)
+	launchctl unload $(BAR_AGENT) 2>/dev/null || true
+	launchctl load $(BAR_AGENT)
+
+unbar:
+	launchctl unload $(BAR_AGENT) 2>/dev/null || true
+	rm -f $(BAR_AGENT)
+
 DASH_PLIST = com.razerpad.dashboard.plist
 DASH_AGENT = $(HOME)/Library/LaunchAgents/$(DASH_PLIST)
 
