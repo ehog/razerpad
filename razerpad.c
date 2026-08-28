@@ -143,7 +143,22 @@ static double smc_read_temp(const char *key) {
 static const char *TEMP_KEYS[] = {"TC0P", "TC0D", "TC0E", "TC0F", "TC1C",
                                   "TC2C", "TC3C", "TC4C", "TC5C", "TC6C"};
 
+/* Optional external temperature source (config: temp_cmd=<shell command>).
+ * The command must print a Celsius float. Lets non-Intel Macs (or anyone
+ * with a preferred sensor tool) plug in their own reading. */
+static char g_temp_cmd[512] = "";
+
 static double cpu_temp(void) {
+    if (g_temp_cmd[0]) {
+        FILE *p = popen(g_temp_cmd, "r");
+        if (!p)
+            return -1;
+        double t = -1;
+        if (fscanf(p, "%lf", &t) != 1)
+            t = -1;
+        pclose(p);
+        return (t > 1.0 && t < 130.0) ? t : -1;
+    }
     double best = -1;
     for (size_t i = 0; i < sizeof(TEMP_KEYS) / sizeof(*TEMP_KEYS); i++) {
         double t = smc_read_temp(TEMP_KEYS[i]);
@@ -400,6 +415,28 @@ static int led_brightness(int percent) {
     return led_send(0x04, args, sizeof(args));
 }
 
+/* Map temperature onto a green→amber→red gradient for reactive lighting. */
+static void temp_to_rgb(double t, uint8_t *r, uint8_t *g, uint8_t *b) {
+    double x = (t - 55.0) / (95.0 - 55.0); /* 55°C green .. 95°C red */
+    if (x < 0)
+        x = 0;
+    if (x > 1)
+        x = 1;
+    double h = 120.0 * (1.0 - x) / 60.0; /* hue in sextants: 2=green, 0=red */
+    double f = h - (int)h;
+    double R = 0, G = 0, B = 0;
+    switch ((int)h) {
+    case 0: R = 1; G = f; break;
+    case 1: R = 1 - f; G = 1; break;
+    default: G = 1; break;
+    }
+    *r = (uint8_t)(R * 255);
+    *g = (uint8_t)(G * 255);
+    *b = (uint8_t)(B * 255);
+}
+
+static int g_reactive_bucket = -1000;
+
 /* Parse "static:RRGGBB" / "spectrum" / ... and apply. Returns status. */
 static int led_apply_spec(const char *spec, const char *color_hex) {
     unsigned r = 0, g = 255, b = 0;
@@ -599,6 +636,8 @@ static int config_poll(void) {
             g_battery_quiet = v < 0 ? 0 : v > 90 ? 90 : v;
         } else if (!strcmp(key, "override")) {
             snprintf(g_override, sizeof(g_override), "%s", val);
+        } else if (!strcmp(key, "temp_cmd")) {
+            snprintf(g_temp_cmd, sizeof(g_temp_cmd), "%s", val);
         }
     }
     fclose(f);
@@ -628,15 +667,75 @@ static void status_write(double temp, int rpm, int connected) {
     rename(tmp, g_status_path);
 }
 
+/* ── thermal history: one averaged CSV row (ts,temp,rpm) every 30s ── */
+
+static char g_history_path[512];
+static double g_hist_sum_t = 0;
+static long g_hist_sum_r = 0;
+static int g_hist_n = 0;
+static time_t g_hist_flush = 0;
+
+static void history_tick(double temp, int rpm) {
+    if (!g_history_path[0] || temp < 0)
+        return;
+    g_hist_sum_t += temp;
+    g_hist_sum_r += rpm;
+    g_hist_n++;
+    time_t now = time(NULL);
+    if (!g_hist_flush)
+        g_hist_flush = now;
+    if (now - g_hist_flush < 30)
+        return;
+    FILE *f = fopen(g_history_path, "a");
+    if (f) {
+        fprintf(f, "%ld,%.1f,%d\n", (long)now, g_hist_sum_t / g_hist_n,
+                (int)(g_hist_sum_r / g_hist_n));
+        fclose(f);
+    }
+    g_hist_sum_t = 0;
+    g_hist_sum_r = 0;
+    g_hist_n = 0;
+    g_hist_flush = now;
+}
+
+/* Keep the history file bounded: when it exceeds ~2MB, keep the last 1MB. */
+static void history_trim(void) {
+    struct stat st;
+    if (stat(g_history_path, &st) != 0 || st.st_size < 2 * 1024 * 1024)
+        return;
+    FILE *f = fopen(g_history_path, "r");
+    if (!f)
+        return;
+    long keep = 1024 * 1024;
+    fseek(f, -keep, SEEK_END);
+    char *buf = malloc((size_t)keep + 1);
+    size_t got = fread(buf, 1, (size_t)keep, f);
+    fclose(f);
+    buf[got] = 0;
+    char *start = strchr(buf, '\n'); /* drop the partial first line */
+    if (start) {
+        FILE *out = fopen(g_history_path, "w");
+        if (out) {
+            fputs(start + 1, out);
+            fclose(out);
+        }
+    }
+    free(buf);
+}
+
 /* Apply LED settings from config; called on config change / reconnect. */
 static void led_apply_config(void) {
     if (!g_pad || !g_led_effect[0])
         return;
-    int st = led_apply_spec(g_led_effect, g_led_color);
-    if (st != RZR_STATUS_OK)
-        fprintf(stderr, "led: effect '%s' -> status %d\n", g_led_effect, st);
+    if (!strcmp(g_led_effect, "reactive")) {
+        g_reactive_bucket = -1000; /* the daemon loop drives the color */
+    } else {
+        int st = led_apply_spec(g_led_effect, g_led_color);
+        if (st != RZR_STATUS_OK)
+            fprintf(stderr, "led: effect '%s' -> status %d\n", g_led_effect, st);
+    }
     if (g_led_bright >= 0) {
-        st = led_brightness(g_led_bright);
+        int st = led_brightness(g_led_bright);
         if (st != RZR_STATUS_OK)
             fprintf(stderr, "led: brightness -> status %d\n", st);
     }
@@ -692,7 +791,8 @@ int main(int argc, char **argv) {
     }
 
     if (do_temp) {
-        if (smc_open() != kIOReturnSuccess) {
+        config_poll(); /* pick up temp_cmd if configured */
+        if (!g_temp_cmd[0] && smc_open() != kIOReturnSuccess) {
             fprintf(stderr, "Cannot open SMC.\n");
             return 1;
         }
@@ -726,6 +826,11 @@ int main(int argc, char **argv) {
             } else
                 printf("Fan set to %d RPM.\n", ((fixed_rpm + 25) / 50) * 50);
         }
+        if (led_spec && !rc && !strncmp(led_spec, "reactive", 8)) {
+            fprintf(stderr, "reactive is a daemon mode: set led=reactive in "
+                            "~/.config/razerpad/config\n");
+            rc = 1;
+        }
         if (led_spec && !rc) {
             int st = led_apply_spec(led_spec, NULL);
             if (st == RZR_STATUS_OK)
@@ -756,8 +861,11 @@ int main(int argc, char **argv) {
     }
 
     /* ── Fan-curve daemon mode ── */
-    if (smc_open() != kIOReturnSuccess) {
-        fprintf(stderr, "Cannot open SMC — is this an Intel Mac?\n");
+    config_poll(); /* load temp_cmd (and everything else) before probing */
+    if (!g_temp_cmd[0] && smc_open() != kIOReturnSuccess) {
+        fprintf(stderr,
+                "Cannot open SMC — is this an Intel Mac? On other Macs, set\n"
+                "temp_cmd=<command printing degrees C> in ~/.config/razerpad/config\n");
         return 1;
     }
     if (cpu_temp() < 0) {
@@ -768,6 +876,10 @@ int main(int argc, char **argv) {
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
     power_init();
+
+    snprintf(g_history_path, sizeof(g_history_path),
+             "%s/.config/razerpad/history.csv", home ? home : "/tmp");
+    history_trim();
 
     config_poll();
     log_line("razerpad starting: interval=%.1fs, config=%s", g_interval,
@@ -804,7 +916,9 @@ int main(int argc, char **argv) {
                     log_line("Cooling pad disconnected — waiting for it to return");
                     was_connected = 0;
                 }
-                status_write(cpu_temp(), 0, 0);
+                double t = cpu_temp();
+                status_write(t, 0, 0);
+                history_tick(t, 0);
                 idle_wait(5.0);
                 continue;
             }
@@ -842,6 +956,18 @@ int main(int argc, char **argv) {
             if (verbose)
                 log_line("%.1f degC -> %.0f%% -> %d RPM", temp, pct, rpm);
             status_write(temp, last_rpm > 0 ? last_rpm : 0, 1);
+            history_tick(temp, last_rpm > 0 ? last_rpm : 0);
+
+            /* reactive lighting: color tracks temperature in 2°C steps */
+            if (g_pad && !strcmp(g_led_effect, "reactive")) {
+                int bucket = (int)(temp / 2.0);
+                if (bucket != g_reactive_bucket) {
+                    uint8_t lr, lg, lb;
+                    temp_to_rgb(temp, &lr, &lg, &lb);
+                    if (led_static(lr, lg, lb) == RZR_STATUS_OK)
+                        g_reactive_bucket = bucket;
+                }
+            }
         }
 
         idle_wait(g_interval);

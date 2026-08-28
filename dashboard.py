@@ -10,11 +10,13 @@ import json
 import os
 import re
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = 8737
 STATUS_PATH = "/tmp/razerpad-status.json"
 CONFIG_PATH = os.path.expanduser("~/.config/razerpad/config")
+HISTORY_PATH = os.path.expanduser("~/.config/razerpad/history.csv")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 STATIC_ROUTES = {
@@ -25,7 +27,8 @@ STATIC_ROUTES = {
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
 }
 
-LED_EFFECTS = {"off", "static", "spectrum", "wave", "wave2", "breath", "unmanaged"}
+LED_EFFECTS = {"off", "static", "spectrum", "wave", "wave2", "breath",
+               "reactive", "unmanaged"}
 
 
 def read_status():
@@ -36,6 +39,35 @@ def read_status():
         return st
     except (OSError, ValueError):
         return {"stale": True, "connected": False, "temp": -1, "rpm": 0}
+
+
+def read_history(hours):
+    """Rows within the window, thinned to <=400 points, plus summary stats."""
+    cutoff = time.time() - hours * 3600
+    rows = []
+    try:
+        with open(HISTORY_PATH) as f:
+            for line in f:
+                try:
+                    ts, temp, rpm = line.strip().split(",")
+                    ts = int(ts)
+                    if ts >= cutoff:
+                        rows.append((ts, float(temp), int(rpm)))
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    stats = {}
+    if rows:
+        temps = [r[1] for r in rows]
+        stats = {
+            "max_temp": max(temps),
+            "avg_temp": sum(temps) / len(temps),
+            "pct_above_90": 100 * sum(1 for t in temps if t >= 90) / len(temps),
+            "pct_above_95": 100 * sum(1 for t in temps if t >= 95) / len(temps),
+        }
+    step = max(1, len(rows) // 400)
+    return {"points": rows[::step], "stats": stats}
 
 
 def read_config():
@@ -139,12 +171,25 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
         elif self.path == "/api/status":
             self._json({"status": read_status(), "config": read_config()})
+        elif self.path.startswith("/api/history"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                hours = float(q.get("hours", ["24"])[0])
+            except ValueError:
+                hours = 24.0
+            self._json(read_history(min(max(hours, 0.1), 24 * 30)))
         else:
             self.send_error(404)
 
     def do_POST(self):
         if self.path != "/api/config":
             self.send_error(404)
+            return
+        # CSRF guard: the custom header forces a CORS preflight, which a
+        # cross-origin page (e.g. a malicious website POSTing to localhost)
+        # cannot pass. Same-origin dashboard JS sets it explicitly.
+        if self.headers.get("X-Razerpad") != "1":
+            self._json({"ok": False, "error": "missing X-Razerpad header"}, 403)
             return
         try:
             length = int(self.headers.get("Content-Length", 0))
