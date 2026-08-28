@@ -216,6 +216,14 @@ static int pad_open(void) {
         free(list);
     }
     CFRelease(devs);
+    /* Without a scheduled run loop the manager never refreshes its device
+     * set, so a hot-plugged pad would stay invisible. Recreate it on the
+     * next attempt instead. */
+    if (!g_pad) {
+        IOHIDManagerClose(g_hid_mgr, kIOHIDOptionsTypeNone);
+        CFRelease(g_hid_mgr);
+        g_hid_mgr = NULL;
+    }
     return g_pad != NULL;
 }
 
@@ -696,6 +704,7 @@ int main(int argc, char **argv) {
 
     int last_rpm = -1;
     int was_connected = 0;
+    int cycles_since_send = 0;
 
     while (g_running) {
         if (config_poll()) {
@@ -729,11 +738,15 @@ int main(int argc, char **argv) {
             /* hysteresis: ignore single-step (50 RPM) wobble from sensor noise */
             if (last_rpm >= 0 && abs(rpm - last_rpm) <= 50)
                 rpm = last_rpm;
-            if (rpm != last_rpm) {
+            /* heartbeat: re-send unchanged RPM every 10 cycles so a silent
+             * disconnect is noticed even when the temperature is steady */
+            if (rpm != last_rpm || ++cycles_since_send >= 10) {
+                int changed = rpm != last_rpm;
                 if (pad_set_rpm(rpm) == kIOReturnSuccess) {
-                    if (!verbose)
+                    if (changed && !verbose)
                         log_line("%.1f degC -> %d RPM", temp, rpm);
                     last_rpm = rpm;
+                    cycles_since_send = 0;
                 } else {
                     log_line("Send failed — pad disconnected?");
                     last_rpm = -1;
