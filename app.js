@@ -26,7 +26,11 @@ async function apiStatus() {
   return r.json();
 }
 async function apiConfig(body) {
-  const r = await fetch("/api/config", { method: "POST", body: JSON.stringify(body) });
+  const r = await fetch("/api/config", {
+    method: "POST",
+    headers: { "X-Razerpad": "1" },
+    body: JSON.stringify(body),
+  });
   return r.json();
 }
 function flash(el, ok, text) {

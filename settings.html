@@ -76,6 +76,7 @@
             <option value="wave">Wave →</option>
             <option value="wave2">Wave ←</option>
             <option value="breath">Breathing</option>
+            <option value="reactive">Reactive (color tracks CPU temp)</option>
           </select>
           <label for="ledColor" id="colorLabel">Color</label>
           <input type="color" id="ledColor" value="#00ff00">
@@ -148,7 +149,8 @@ function loadConfig(cfg) {
   curvePts = parseCurveStr(cfg.curve || "40:0,60:15,75:25,85:40,93:65,98:100");
   $("interval").value = cfg.interval || "3";
   $("battQuiet").value = cfg.battery_quiet || "0";
-  const effects = ["off", "static", "spectrum", "wave", "wave2", "breath", "unmanaged"];
+  const effects = ["off", "static", "spectrum", "wave", "wave2", "breath",
+                   "reactive", "unmanaged"];
   $("led").value = effects.includes(cfg.led) ? cfg.led : "unmanaged";
   if (cfg.led_color) $("ledColor").value = "#" + cfg.led_color;
   $("bright").value = cfg.brightness >= 0 ? cfg.brightness : 80;
