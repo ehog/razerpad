@@ -78,16 +78,21 @@ const rpmChart = lineChart($("rpmChart"), $("rpmTip"), "--fan",
   { ymin: 0, ymax: 3300, fmt: v => (v / 1000).toFixed(1) + "k" });
 const curve = curveChart($("curveCanvas"));
 
-/* ── history range selector ── */
+/* ── history range selector (preselectable via ?range=1|24|168) ── */
 let range = "live";
+function setRange(r) {
+  range = r;
+  document.querySelectorAll("#rangeSeg button")
+    .forEach(x => { x.className = x.dataset.r === r ? "active" : ""; });
+  loadHistory();
+}
 document.querySelectorAll("#rangeSeg button").forEach(b => {
-  b.onclick = () => {
-    range = b.dataset.r;
-    document.querySelectorAll("#rangeSeg button")
-      .forEach(x => { x.className = x === b ? "active" : ""; });
-    loadHistory();
-  };
+  b.onclick = () => setRange(b.dataset.r);
 });
+{
+  const q = new URLSearchParams(location.search).get("range");
+  if (["1", "24", "168"].includes(q)) setRange(q);
+}
 
 async function loadHistory() {
   if (range === "live") { $("histStats").textContent = ""; redrawCharts(); return; }

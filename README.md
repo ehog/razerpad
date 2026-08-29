@@ -18,6 +18,14 @@ Highlights:
   persistent thermal history (1h/24h/7d + stats), curve editor, °C/°F
 - Menu bar readout with a fan mode switcher
 
+![Dashboard](docs/img/dashboard.png)
+
+<details>
+<summary>Settings page</summary>
+
+![Settings](docs/img/settings.png)
+</details>
+
 Single dependency-free C binary using IOKit:
 
 - **CPU temperature** — read from the SMC (`TC0P`/`TC0D`/per-core keys; the
@@ -109,11 +117,18 @@ the dashboard reads the former and writes the latter. LED settings from the
 config are re-applied on config change and whenever the pad reconnects. Set
 `led=unmanaged` to leave lighting alone entirely.
 
-Config keys: `interval`, `curve`, `led` (effects above plus `reactive`),
-`led_color`, `brightness`, `battery_quiet` (0–90, % shaved off the curve on
-battery), `override` (`off`/`quiet`/`max` — what the menu bar app switches),
-`temp_cmd` (optional shell command printing °C, used instead of the SMC —
-config-file only, not settable via the web API).
+### Config reference (`~/.config/razerpad/config`)
+
+| Key | Values | Meaning |
+|-----|--------|---------|
+| `interval` | 0.5–60 | Poll interval in seconds (default 3) |
+| `curve` | `temp:pct,…` | Fan curve points, °C → percent of 500–3200 RPM |
+| `led` | `off` `static` `spectrum` `wave` `wave2` `breath` `reactive` `unmanaged` | Lighting effect; `reactive` tracks CPU temp, `unmanaged` leaves lighting alone |
+| `led_color` | `RRGGBB` | Color for `static`/`breath` |
+| `brightness` | 0–100 | LED brightness |
+| `battery_quiet` | 0–90 | Percent shaved off the curve on battery power |
+| `override` | `off` `quiet` `max` | Pin fans (what the menu bar app switches) |
+| `temp_cmd` | shell command | Prints °C; replaces the SMC reader. **Config-file only** — never settable via the web API |
 
 Thermal history is appended to `~/.config/razerpad/history.csv` (30-second
 averages, bounded at ~2 MB).
@@ -148,6 +163,34 @@ To change the curve the agent uses, edit `ProgramArguments` in
 - No root or special TCC permissions needed — the pad is a vendor-specific HID
   device.
 
+## Troubleshooting
+
+- **Pad not found** — confirm macOS sees it:
+  `system_profiler SPUSBDataType | grep -A4 Razer`. Try a different port/hub;
+  the pad needs a data connection, not just power.
+- **"Cannot open SMC"** — you're likely on Apple Silicon; set `temp_cmd`
+  (see above).
+- **`razerpad -r` returns a weird number** — expected right after a lighting
+  command; the pad has no tachometer and only echoes its last response.
+  The dashboard uses the daemon's status file instead.
+- **Dashboard unreachable** — is the agent running?
+  `launchctl list com.razerpad.dashboard`; logs in
+  `/tmp/razerpad-dashboard.log`. Port is `8737` (edit `PORT` in
+  `dashboard.py` if something else owns it).
+- **Fans do nothing when the daemon is stopped** — by design: on exit the
+  daemon releases control back to the pad's own firmware.
+- Daemon logs: `/tmp/razerpad.log`.
+
+## Uninstall
+
+```sh
+make unagent undashboard unbar     # stop + remove all launchd agents
+rm -f /usr/local/bin/razerpad /usr/local/bin/razerpadbar
+rm -rf ~/.config/razerpad          # config + thermal history
+```
+
+Homebrew installs: `brew services stop razerpad && brew uninstall razerpad`.
+
 ## Security & safety model
 
 Nothing in this project runs in the kernel. There is no kext, no DriverKit
@@ -179,6 +222,20 @@ The web dashboard binds to `127.0.0.1` only, and its config-writing endpoint
 requires a custom header so cross-origin pages cannot POST to it. The
 `temp_cmd` config key executes a shell command and is therefore settable only
 by editing the config file directly, never through the web API.
+
+## Documentation & contributing
+
+- [docs/PROTOCOL.md](docs/PROTOCOL.md) — the reverse-engineered USB protocol
+- [CHANGELOG.md](CHANGELOG.md) — release history
+- [CONTRIBUTING.md](CONTRIBUTING.md) — layout, testing, ground rules
+
+## Credits
+
+- Fan protocol: [Benson5650/FanControl.RazerCoolingPadPlugin](https://github.com/Benson5650/FanControl.RazerCoolingPadPlugin)
+  and [Nox1con/razer-coolingpad-linux](https://github.com/Nox1con/razer-coolingpad-linux)
+- Lighting protocol verified here and shared in
+  [openrazer#2382](https://github.com/openrazer/openrazer/issues/2382)
+- SMC reading approach after [osx-cpu-temp](https://github.com/lavoiesl/osx-cpu-temp)/SMCKit lineage
 
 ## License
 

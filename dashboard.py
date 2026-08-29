@@ -156,8 +156,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        if self.path in STATIC_ROUTES:
-            fname, ctype = STATIC_ROUTES[self.path]
+        route = urllib.parse.urlparse(self.path).path
+        if route in STATIC_ROUTES:
+            fname, ctype = STATIC_ROUTES[route]
             try:
                 with open(os.path.join(BASE_DIR, fname), "rb") as f:
                     data = f.read()
