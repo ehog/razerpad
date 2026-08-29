@@ -148,6 +148,38 @@ To change the curve the agent uses, edit `ProgramArguments` in
 - No root or special TCC permissions needed — the pad is a vendor-specific HID
   device.
 
+## Security & safety model
+
+Nothing in this project runs in the kernel. There is no kext, no DriverKit
+driver, and no root: everything is an ordinary unprivileged user process
+using two of Apple's sanctioned userspace interfaces.
+
+- **HID (fan + lighting)** — `IOHIDManager` / `IOHIDDeviceSetReport` hands
+  feature reports to Apple's own kernel HID stack, the same path any
+  game-controller or keyboard-configuration tool uses. The kernel-side code
+  involved is Apple's, unchanged.
+- **SMC (temperature)** — the `AppleSMC` user client, **read-only**. The
+  daemon only reads sensor keys (`TC0P` etc.). It never writes SMC keys and
+  never touches the Mac's internal fans — the operations that could actually
+  do harm.
+
+Blast radius if something goes wrong:
+
+- Daemon crash → launchd restarts it; the pad falls back to its own firmware
+  behavior (and on daemon exit or system sleep, control is explicitly
+  released).
+- Malformed command → the pad's firmware validates commands (checksummed,
+  with a status-byte response) and ignores what it doesn't accept. The pad is
+  an external accessory with its own microcontroller; it cannot modify your
+  Mac's state.
+- Worst imaginable case — fans stuck at full speed — is ~18 W of noise until
+  you unplug it.
+
+The web dashboard binds to `127.0.0.1` only, and its config-writing endpoint
+requires a custom header so cross-origin pages cannot POST to it. The
+`temp_cmd` config key executes a shell command and is therefore settable only
+by editing the config file directly, never through the web API.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
