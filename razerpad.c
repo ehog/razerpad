@@ -1,9 +1,10 @@
 /*
  * razerpad — fan-curve + lighting controller for the Razer Laptop Cooling Pad
- * on macOS (Intel).
+ * on macOS (Intel) and Linux.
  *
- * Reads the CPU die temperature from the SMC and drives the pad's fans over
- * USB HID feature reports. The pad speaks the standard Razer Chroma wire
+ * Reads the CPU die temperature (macOS: the SMC; Linux: hwmon coretemp) and
+ * drives the pad's fans over USB HID feature reports (macOS: IOKit; Linux:
+ * hidraw). The pad speaks the standard Razer Chroma wire
  * protocol (90-byte reports, XOR checksum), so lighting is driven with the
  * standard "extended matrix" commands (class 0x0F). Fan protocol originally
  * reverse-engineered by github.com/Benson5650/FanControl.RazerCoolingPadPlugin
@@ -27,6 +28,7 @@
  *   - writes live status JSON to /tmp/razerpad-status.json each cycle
  */
 
+#ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <IOKit/IOMessage.h>
@@ -34,7 +36,18 @@
 #include <IOKit/ps/IOPSKeys.h>
 #include <IOKit/ps/IOPowerSources.h>
 #include <IOKit/pwr_mgt/IOPMLib.h>
+#elif defined(__linux__)
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <linux/hidraw.h>
+#include <sys/ioctl.h>
+#else
+#error "razerpad supports macOS and Linux"
+#endif
 #include <signal.h>
+#include <stdint.h>
+#include <time.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,7 +55,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* ───────────────────────── SMC (CPU temperature) ───────────────────────── */
+/* ───────────────────────── CPU temperature ───────────────────────── */
+
+#ifdef __APPLE__
+/* macOS: read the SMC directly. */
 
 #define KERNEL_INDEX_SMC 2
 #define SMC_CMD_READ_BYTES 5
@@ -143,6 +159,98 @@ static double smc_read_temp(const char *key) {
 static const char *TEMP_KEYS[] = {"TC0P", "TC0D", "TC0E", "TC0F", "TC1C",
                                   "TC2C", "TC3C", "TC4C", "TC5C", "TC6C"};
 
+static int temp_init(void) { return smc_open() == kIOReturnSuccess ? 0 : -1; }
+
+static double hw_temp(void) {
+    double best = -1;
+    for (size_t i = 0; i < sizeof(TEMP_KEYS) / sizeof(*TEMP_KEYS); i++) {
+        double t = smc_read_temp(TEMP_KEYS[i]);
+        if (t > 1.0 && t < 120.0 && t > best)
+            best = t;
+    }
+    return best;
+}
+
+#define TEMP_INIT_HINT "Cannot open SMC — is this an Intel Mac? On other Macs, set\n" \
+    "temp_cmd=<command printing degrees C> in ~/.config/razerpad/config\n"
+
+#else /* __linux__ */
+/* Linux: the hottest reading of the coretemp hwmon device (package + cores),
+ * falling back to the x86_pkg_temp / cpu thermal zones. */
+
+static double read_milli(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return -1;
+    long v;
+    int ok = fscanf(f, "%ld", &v) == 1;
+    fclose(f);
+    return ok ? v / 1000.0 : -1;
+}
+
+static int read_line(const char *path, char *out, size_t n) {
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return -1;
+    int ok = fgets(out, (int)n, f) != NULL;
+    fclose(f);
+    if (!ok)
+        return -1;
+    out[strcspn(out, "\n")] = 0;
+    return 0;
+}
+
+static double hw_temp(void) {
+    double best = -1;
+    char path[512], name[64];
+    DIR *d = opendir("/sys/class/hwmon");
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (e->d_name[0] == '.')
+                continue;
+            snprintf(path, sizeof(path), "/sys/class/hwmon/%s/name", e->d_name);
+            if (read_line(path, name, sizeof(name)) || strcmp(name, "coretemp"))
+                continue;
+            for (int i = 1; i < 64; i++) {
+                snprintf(path, sizeof(path), "/sys/class/hwmon/%s/temp%d_input",
+                         e->d_name, i);
+                double t = read_milli(path);
+                if (t > 1.0 && t < 120.0 && t > best)
+                    best = t;
+            }
+        }
+        closedir(d);
+    }
+    if (best > 0)
+        return best;
+    d = opendir("/sys/class/thermal");
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (strncmp(e->d_name, "thermal_zone", 12))
+                continue;
+            snprintf(path, sizeof(path), "/sys/class/thermal/%s/type", e->d_name);
+            if (read_line(path, name, sizeof(name)) ||
+                (strcmp(name, "x86_pkg_temp") && strncmp(name, "cpu", 3)))
+                continue;
+            snprintf(path, sizeof(path), "/sys/class/thermal/%s/temp", e->d_name);
+            double t = read_milli(path);
+            if (t > 1.0 && t < 120.0 && t > best)
+                best = t;
+        }
+        closedir(d);
+    }
+    return best;
+}
+
+static int temp_init(void) { return hw_temp() > 0 ? 0 : -1; }
+
+#define TEMP_INIT_HINT "No coretemp hwmon or x86_pkg_temp thermal zone found.\n" \
+    "Load the coretemp module, or set temp_cmd=<command printing degrees C>\n" \
+    "in ~/.config/razerpad/config\n"
+#endif
+
 /* Optional external temperature source (config: temp_cmd=<shell command>).
  * The command must print a Celsius float. Lets non-Intel Macs (or anyone
  * with a preferred sensor tool) plug in their own reading. */
@@ -159,13 +267,7 @@ static double cpu_temp(void) {
         pclose(p);
         return (t > 1.0 && t < 130.0) ? t : -1;
     }
-    double best = -1;
-    for (size_t i = 0; i < sizeof(TEMP_KEYS) / sizeof(*TEMP_KEYS); i++) {
-        double t = smc_read_temp(TEMP_KEYS[i]);
-        if (t > 1.0 && t < 120.0 && t > best)
-            best = t;
-    }
-    return best;
+    return hw_temp();
 }
 
 /* ─────────────────────── Razer Cooling Pad (HID) ────────────────────────── */
@@ -176,6 +278,7 @@ static double cpu_temp(void) {
 #define RZR_MIN_RPM 500
 #define RZR_MAX_RPM 3200
 
+#ifdef __APPLE__
 static IOHIDManagerRef g_hid_mgr = NULL;
 static IOHIDDeviceRef g_pad = NULL;
 
@@ -246,15 +349,119 @@ static int pad_open(void) {
     return g_pad != NULL;
 }
 
-static IOReturn pad_send(const uint8_t *report) {
+static int pad_connected(void) { return g_pad != NULL; }
+
+/* Send one feature report. Returns 0 on success. */
+static int pad_send(const uint8_t *report) {
     if (!g_pad)
-        return kIOReturnNotOpen;
+        return -1;
     IOReturn r = IOHIDDeviceSetReport(g_pad, kIOHIDReportTypeFeature, 0,
                                       report, RZR_REPORT_LEN);
-    if (r != kIOReturnSuccess)
+    if (r != kIOReturnSuccess) {
         pad_close(); /* device likely unplugged; reopen on next cycle */
-    return r;
+        return -1;
+    }
+    return 0;
 }
+
+/* Read the pad's feature report into buf. Returns 0 on success. */
+static int pad_get(uint8_t *buf) {
+    if (!g_pad)
+        return -1;
+    CFIndex len = RZR_REPORT_LEN;
+    return IOHIDDeviceGetReport(g_pad, kIOHIDReportTypeFeature, 0, buf, &len) ==
+                   kIOReturnSuccess
+               ? 0
+               : -1;
+}
+
+#else /* __linux__ */
+static int g_pad_fd = -1;
+
+static void pad_close(void) {
+    if (g_pad_fd >= 0) {
+        close(g_pad_fd);
+        g_pad_fd = -1;
+    }
+}
+
+static int pad_connected(void) { return g_pad_fd >= 0; }
+
+/* hidraw feature reports carry the report ID (0) as byte 0. */
+static int hidraw_get(int fd, uint8_t *body) {
+    uint8_t buf[RZR_REPORT_LEN + 1] = {0};
+    int n = ioctl(fd, HIDIOCGFEATURE(sizeof(buf)), buf);
+    if (n < RZR_REPORT_LEN)
+        return -1;
+    memcpy(body, buf + 1, RZR_REPORT_LEN);
+    return 0;
+}
+
+/* Find the pad's control interface: of the hidraw nodes whose HID_ID matches
+ * the pad, the one that answers a 90-byte feature report. Returns 1 if open. */
+static int pad_open(void) {
+    if (g_pad_fd >= 0)
+        return 1;
+    char want[64], path[512], line[256];
+    snprintf(want, sizeof(want), "HID_ID=0003:%08X:%08X", RZR_VID, RZR_PID);
+    DIR *d = opendir("/sys/class/hidraw");
+    if (!d)
+        return 0;
+    struct dirent *e;
+    while ((e = readdir(d)) && g_pad_fd < 0) {
+        if (strncmp(e->d_name, "hidraw", 6))
+            continue;
+        snprintf(path, sizeof(path), "/sys/class/hidraw/%s/device/uevent", e->d_name);
+        FILE *f = fopen(path, "r");
+        if (!f)
+            continue;
+        int match = 0;
+        while (fgets(line, sizeof(line), f))
+            if (!strncasecmp(line, want, strlen(want)))
+                match = 1;
+        fclose(f);
+        if (!match)
+            continue;
+        snprintf(path, sizeof(path), "/dev/%s", e->d_name);
+        int fd = open(path, O_RDWR | O_CLOEXEC);
+        if (fd < 0) {
+            if (errno == EACCES)
+                fprintf(stderr, "%s: permission denied (install the udev rule: make udev)\n",
+                        path);
+            continue;
+        }
+        uint8_t body[RZR_REPORT_LEN];
+        if (hidraw_get(fd, body) == 0)
+            g_pad_fd = fd;
+        else
+            close(fd);
+    }
+    closedir(d);
+    return g_pad_fd >= 0;
+}
+
+/* Send one feature report. Returns 0 on success. */
+static int pad_send(const uint8_t *report) {
+    if (g_pad_fd < 0)
+        return -1;
+    uint8_t buf[RZR_REPORT_LEN + 1];
+    buf[0] = 0; /* report ID */
+    memcpy(buf + 1, report, RZR_REPORT_LEN);
+    if (ioctl(g_pad_fd, HIDIOCSFEATURE(sizeof(buf)), buf) < 0) {
+        pad_close(); /* device likely unplugged; reopen on next cycle */
+        return -1;
+    }
+    return 0;
+}
+
+/* Read the pad's feature report into buf. Returns 0 on success. */
+static int pad_get(uint8_t *buf) {
+    if (g_pad_fd < 0)
+        return -1;
+    return hidraw_get(g_pad_fd, buf);
+}
+
+#endif
 
 /* ── Generic Razer Chroma protocol ──
  * Report body: status, transaction_id, remaining[2], protocol, data_size,
@@ -283,14 +490,11 @@ static int razer_cmd(uint8_t txn, uint8_t cls, uint8_t cmd,
                      const uint8_t *args, uint8_t argc) {
     uint8_t buf[RZR_REPORT_LEN];
     razer_build(buf, txn, cls, cmd, args, argc);
-    if (pad_send(buf) != kIOReturnSuccess)
+    if (pad_send(buf) != 0)
         return -1;
     usleep(80000);
     uint8_t resp[RZR_REPORT_LEN] = {0};
-    CFIndex len = RZR_REPORT_LEN;
-    if (!g_pad ||
-        IOHIDDeviceGetReport(g_pad, kIOHIDReportTypeFeature, 0, resp, &len) !=
-            kIOReturnSuccess)
+    if (pad_get(resp) != 0)
         return -1;
     return resp[0];
 }
@@ -298,7 +502,7 @@ static int razer_cmd(uint8_t txn, uint8_t cls, uint8_t cmd,
 /* Fan commands — class 0x0D, transaction 0x02 (as captured from Synapse). */
 #define FAN_TXN 0x02
 
-static IOReturn pad_set_rpm(int rpm) {
+static int pad_set_rpm(int rpm) {
     if (rpm < RZR_MIN_RPM)
         rpm = RZR_MIN_RPM;
     if (rpm > RZR_MAX_RPM)
@@ -316,7 +520,7 @@ static IOReturn pad_set_rpm(int rpm) {
     return pad_send(buf);
 }
 
-static IOReturn pad_release(void) {
+static int pad_release(void) {
     uint8_t args[2] = {0x00, 0x06};
     uint8_t buf[RZR_REPORT_LEN];
     razer_build(buf, FAN_TXN, 0x0D, 0x10, args, 2);
@@ -331,12 +535,8 @@ static IOReturn pad_release(void) {
 
 /* Returns the last commanded RPM (the pad has no tachometer), or -1. */
 static int pad_read_rpm(void) {
-    if (!g_pad)
-        return -1;
     uint8_t buf[RZR_REPORT_LEN] = {0};
-    CFIndex len = RZR_REPORT_LEN;
-    IOReturn r = IOHIDDeviceGetReport(g_pad, kIOHIDReportTypeFeature, 0, buf, &len);
-    if (r != kIOReturnSuccess)
+    if (pad_get(buf) != 0)
         return -1;
     return (buf[10] | (buf[11] << 8)) * 50;
 }
@@ -469,6 +669,7 @@ static void on_signal(int sig) {
     g_running = 0;
 }
 
+#ifdef __APPLE__
 static io_connect_t g_pm_root_port = 0;
 static IONotificationPortRef g_pm_notify_port = NULL;
 static io_object_t g_pm_notifier = 0;
@@ -484,7 +685,7 @@ static void power_callback(void *refcon, io_service_t service,
         break;
     case kIOMessageSystemWillSleep:
         /* stop the pad so it doesn't spin at the last speed all night */
-        if (g_pad)
+        if (pad_connected())
             pad_release();
         IOAllowPowerChange(g_pm_root_port, (long)arg);
         break;
@@ -521,6 +722,63 @@ static int on_battery(void) {
     CFRelease(info);
     return batt;
 }
+
+#else /* __linux__ */
+static volatile sig_atomic_t g_just_woke = 0;
+static double g_suspend_base = 0;
+
+/* Time the system spent suspended so far: CLOCK_BOOTTIME counts suspend,
+ * CLOCK_MONOTONIC does not. A jump in the difference means we just woke.
+ * (Releasing the pad before sleep is done by the systemd-sleep hook,
+ * linux/razerpad-sleep, since a plain process gets no pre-sleep notice.) */
+static double suspended_secs(void) {
+    struct timespec b, m;
+    clock_gettime(CLOCK_BOOTTIME, &b);
+    clock_gettime(CLOCK_MONOTONIC, &m);
+    return (b.tv_sec - m.tv_sec) + (b.tv_nsec - m.tv_nsec) / 1e9;
+}
+
+static void power_init(void) { g_suspend_base = suspended_secs(); }
+
+static void idle_wait(double secs) {
+    struct timespec step = {0, 250000000};
+    for (double waited = 0; g_running && !g_just_woke && waited < secs; waited += 0.25) {
+        nanosleep(&step, NULL);
+        double s = suspended_secs();
+        if (s - g_suspend_base > 2.0) {
+            g_suspend_base = s;
+            g_just_woke = 1;
+        }
+    }
+}
+
+/* True when running on battery: no online Mains/USB supply, but a battery. */
+static int on_battery(void) {
+    char path[512], type[32], val[16];
+    int mains_online = 0, have_battery = 0;
+    DIR *d = opendir("/sys/class/power_supply");
+    if (!d)
+        return 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.')
+            continue;
+        snprintf(path, sizeof(path), "/sys/class/power_supply/%s/type", e->d_name);
+        if (read_line(path, type, sizeof(type)))
+            continue;
+        if (!strcmp(type, "Battery")) {
+            have_battery = 1;
+        } else {
+            snprintf(path, sizeof(path), "/sys/class/power_supply/%s/online", e->d_name);
+            if (!read_line(path, val, sizeof(val)) && !strcmp(val, "1"))
+                mains_online = 1;
+        }
+    }
+    closedir(d);
+    return have_battery && !mains_online;
+}
+
+#endif
 
 /* ─────────────────────────── Fan curve & config ─────────────────────────── */
 
@@ -725,7 +983,7 @@ static void history_trim(void) {
 
 /* Apply LED settings from config; called on config change / reconnect. */
 static void led_apply_config(void) {
-    if (!g_pad || !g_led_effect[0])
+    if (!pad_connected() || !g_led_effect[0])
         return;
     if (!strcmp(g_led_effect, "reactive")) {
         g_reactive_bucket = -1000; /* the daemon loop drives the color */
@@ -792,8 +1050,8 @@ int main(int argc, char **argv) {
 
     if (do_temp) {
         config_poll(); /* pick up temp_cmd if configured */
-        if (!g_temp_cmd[0] && smc_open() != kIOReturnSuccess) {
-            fprintf(stderr, "Cannot open SMC.\n");
+        if (!g_temp_cmd[0] && temp_init() != 0) {
+            fprintf(stderr, TEMP_INIT_HINT);
             return 1;
         }
         double t = cpu_temp();
@@ -820,7 +1078,7 @@ int main(int argc, char **argv) {
                 printf("%d\n", rpm);
         }
         if (fixed_rpm > 0 && !rc) {
-            if (pad_set_rpm(fixed_rpm) != kIOReturnSuccess) {
+            if (pad_set_rpm(fixed_rpm) != 0) {
                 fprintf(stderr, "Failed to set RPM.\n");
                 rc = 1;
             } else
@@ -850,7 +1108,7 @@ int main(int argc, char **argv) {
             }
         }
         if (do_off && !rc) {
-            if (pad_release() != kIOReturnSuccess) {
+            if (pad_release() != 0) {
                 fprintf(stderr, "Failed to send release command.\n");
                 rc = 1;
             } else
@@ -862,10 +1120,8 @@ int main(int argc, char **argv) {
 
     /* ── Fan-curve daemon mode ── */
     config_poll(); /* load temp_cmd (and everything else) before probing */
-    if (!g_temp_cmd[0] && smc_open() != kIOReturnSuccess) {
-        fprintf(stderr,
-                "Cannot open SMC — is this an Intel Mac? On other Macs, set\n"
-                "temp_cmd=<command printing degrees C> in ~/.config/razerpad/config\n");
+    if (!g_temp_cmd[0] && temp_init() != 0) {
+        fprintf(stderr, TEMP_INIT_HINT);
         return 1;
     }
     if (cpu_temp() < 0) {
@@ -905,7 +1161,7 @@ int main(int argc, char **argv) {
             led_apply_config();
         }
 
-        if (!g_pad) {
+        if (!pad_connected()) {
             if (pad_open()) {
                 log_line("Cooling pad connected — taking over fan control");
                 was_connected = 1;
@@ -942,7 +1198,7 @@ int main(int argc, char **argv) {
              * disconnect is noticed even when the temperature is steady */
             if (rpm != last_rpm || ++cycles_since_send >= 10) {
                 int changed = rpm != last_rpm;
-                if (pad_set_rpm(rpm) == kIOReturnSuccess) {
+                if (pad_set_rpm(rpm) == 0) {
                     if (changed && !verbose)
                         log_line("%.1f degC -> %d RPM", temp, rpm);
                     last_rpm = rpm;
@@ -959,7 +1215,7 @@ int main(int argc, char **argv) {
             history_tick(temp, last_rpm > 0 ? last_rpm : 0);
 
             /* reactive lighting: color tracks temperature in 2°C steps */
-            if (g_pad && !strcmp(g_led_effect, "reactive")) {
+            if (pad_connected() && !strcmp(g_led_effect, "reactive")) {
                 int bucket = (int)(temp / 2.0);
                 if (bucket != g_reactive_bucket) {
                     uint8_t lr, lg, lb;
@@ -973,7 +1229,7 @@ int main(int argc, char **argv) {
         idle_wait(g_interval);
     }
 
-    if (g_pad) {
+    if (pad_connected()) {
         pad_release();
         log_line("Fan control released.");
     }

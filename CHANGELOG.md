@@ -4,6 +4,13 @@ Notable changes to razerpad-mac. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/).
 
+## Unreleased
+
+- Linux support: hidraw pad access, coretemp/thermal-zone temperature,
+  power_supply battery detection, systemd user services, udev rule and a
+  pre-suspend release hook (`make udev`, `make service`, `make linux-dashboard`).
+- CI builds on Ubuntu as well as macOS.
+
 ## [Unreleased]
 
 ### Added
