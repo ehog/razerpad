@@ -1,0 +1,11 @@
+[Unit]
+Description=razerpad web dashboard (http://127.0.0.1:8737)
+After=razerpad.service
+
+[Service]
+ExecStart=/usr/bin/env python3 @DIR@/dashboard.py
+WorkingDirectory=@DIR@
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

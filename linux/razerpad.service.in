@@ -1,0 +1,11 @@
+[Unit]
+Description=Razer Laptop Cooling Pad fan curve
+After=default.target
+
+[Service]
+ExecStart=@BIN@
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

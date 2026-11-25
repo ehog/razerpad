@@ -18,3 +18,12 @@ jobs:
         run: python3 -m py_compile dashboard.py
       - name: Check dashboard JS
         run: node --check app.js
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build daemon
+        run: make razerpad
+      - name: Check dashboard server
+        run: python3 -m py_compile dashboard.py

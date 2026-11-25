@@ -1,6 +1,13 @@
-CC      = clang
+UNAME  := $(shell uname -s)
 CFLAGS  = -O2 -Wall -Wextra -Wno-multichar
+ifeq ($(UNAME),Darwin)
+CC      = clang
 LDFLAGS = -framework IOKit -framework CoreFoundation
+else
+CC      ?= cc
+CFLAGS += -D_GNU_SOURCE
+LDFLAGS =
+endif
 
 PREFIX  = /usr/local
 PLIST   = com.razerpad.fancurve.plist
@@ -58,4 +65,47 @@ undashboard:
 clean:
 	rm -f razerpad
 
-.PHONY: install agent unagent dashboard undashboard clean
+# ── Linux (systemd + udev) ──────────────────────────────────────────────────
+UNITDIR   = $(HOME)/.config/systemd/user
+UDEVRULE  = /etc/udev/rules.d/70-razerpad.rules
+SLEEPHOOK = /usr/lib/systemd/system-sleep/razerpad
+
+# Root: udev rule (non-root access to the pad) + pre-suspend release hook.
+udev: install
+	install -m 644 linux/70-razerpad.rules $(UDEVRULE)
+	sed "s|@BIN@|$(PREFIX)/bin/razerpad|" linux/razerpad-sleep > $(SLEEPHOOK)
+	chmod 755 $(SLEEPHOOK)
+	udevadm control --reload-rules
+	udevadm trigger --subsystem-match=hidraw --action=add
+
+unudev:
+	rm -f $(UDEVRULE) $(SLEEPHOOK)
+	udevadm control --reload-rules
+
+# User: the fan-curve daemon as a systemd user service. For it to run without
+# a login session (headless), also: sudo loginctl enable-linger $$USER
+service:
+	install -d $(UNITDIR)
+	sed "s|@BIN@|$(PREFIX)/bin/razerpad|" linux/razerpad.service.in > $(UNITDIR)/razerpad.service
+	systemctl --user daemon-reload
+	systemctl --user enable --now razerpad.service
+	@echo "Logs: journalctl --user -u razerpad -f"
+
+unservice:
+	systemctl --user disable --now razerpad.service 2>/dev/null || true
+	rm -f $(UNITDIR)/razerpad.service
+	systemctl --user daemon-reload
+
+linux-dashboard:
+	install -d $(UNITDIR)
+	sed "s|@DIR@|$(CURDIR)|g" linux/razerpad-dashboard.service.in > $(UNITDIR)/razerpad-dashboard.service
+	systemctl --user daemon-reload
+	systemctl --user enable --now razerpad-dashboard.service
+	@echo "Dashboard: http://127.0.0.1:8737"
+
+linux-undashboard:
+	systemctl --user disable --now razerpad-dashboard.service 2>/dev/null || true
+	rm -f $(UNITDIR)/razerpad-dashboard.service
+	systemctl --user daemon-reload
+
+.PHONY: install agent unagent dashboard undashboard clean udev unudev service unservice linux-dashboard linux-undashboard

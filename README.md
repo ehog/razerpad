@@ -3,7 +3,7 @@
 [![build](https://github.com/ehog/razerpad-mac/actions/workflows/build.yml/badge.svg)](https://github.com/ehog/razerpad-mac/actions/workflows/build.yml)
 
 Automatic fan-speed regulation **and Chroma lighting control** for the
-**Razer Laptop Cooling Pad** on macOS. Replicates what Razer Synapse does on
+**Razer Laptop Cooling Pad** on macOS and Linux (see [Linux](#linux)). Replicates what Razer Synapse does on
 Windows: reads the CPU die temperature and continuously adjusts the pad's fan
 speed along a fan curve. Includes a local web dashboard and a menu bar app.
 
@@ -132,6 +132,35 @@ config are re-applied on config change and whenever the pad reconnects. Set
 
 Thermal history is appended to `~/.config/razerpad/history.csv` (30-second
 averages, bounded at ~2 MB).
+
+## Linux
+
+The same binary builds on Linux (tested on Ubuntu 26.04, Intel MacBook Pro
+with the T2 kernel). The protocol, curve, config, status file, history and
+dashboard are identical; only the platform layer differs:
+
+| | macOS | Linux |
+| --- | --- | --- |
+| Pad access | IOKit HID manager | `/dev/hidraw*` feature-report ioctls |
+| CPU temperature | SMC keys | hottest `coretemp` hwmon reading, then `x86_pkg_temp` / `cpu*` thermal zones |
+| Battery | IOPowerSources | `/sys/class/power_supply` |
+| Sleep | releases the pad on sleep notice | `systemd-sleep` hook releases it; the daemon detects the wake |
+| Auto-run | launchd agent | systemd user service |
+
+```sh
+make                              # build ./razerpad (needs gcc/clang + make)
+sudo make udev                    # install binary, udev rule, sleep hook
+sudo loginctl enable-linger $USER # only for headless hosts: run without a login
+make service                      # start the fan-curve daemon (systemd --user)
+make linux-dashboard              # optional: dashboard on http://127.0.0.1:8737
+journalctl --user -u razerpad -f  # logs
+```
+
+The udev rule (`linux/70-razerpad.rules`) gives the pad to group `plugdev`
+and to the user at the seat (`uaccess`); without it `/dev/hidraw*` is
+root-only and the daemon logs `permission denied`. The pad exposes two hidraw
+nodes; the control one is picked by probing for the 90-byte feature report.
+Remove with `make unservice linux-undashboard` and `sudo make unudev`.
 
 ## Menu bar app
 

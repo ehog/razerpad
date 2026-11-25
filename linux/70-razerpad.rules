@@ -1,0 +1,3 @@
+# Razer Laptop Cooling Pad (RC21-0230): let the logged-in user (uaccess) and
+# members of plugdev drive it over hidraw without root.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0f43", MODE="0660", GROUP="plugdev", TAG+="uaccess"
