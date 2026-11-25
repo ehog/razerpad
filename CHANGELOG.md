@@ -1,6 +1,6 @@
 # Changelog
 
-Notable changes to razerpad-mac. Format follows
+Notable changes to razerpad (formerly razerpad-mac). Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/).
 
@@ -54,5 +54,5 @@ First tagged release.
 - Dashboard config API requires the `X-Razerpad` header (CSRF guard);
   `temp_cmd` is deliberately not settable through the web API
 
-[Unreleased]: https://github.com/ehog/razerpad-mac/compare/v1.1.0...HEAD
-[1.1.0]: https://github.com/ehog/razerpad-mac/releases/tag/v1.1.0
+[Unreleased]: https://github.com/ehog/razerpad/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/ehog/razerpad/releases/tag/v1.1.0

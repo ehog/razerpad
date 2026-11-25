@@ -43,7 +43,7 @@ unfriendly paths — unplug the pad mid-run, replug it, sleep/wake the Mac.
 ## Especially wanted
 
 - Native Apple Silicon temperature support
-  ([#1](https://github.com/ehog/razerpad-mac/issues/1))
+  ([#1](https://github.com/ehog/razerpad/issues/1))
 - Fan-curve presets/profiles
-  ([#2](https://github.com/ehog/razerpad-mac/issues/2))
+  ([#2](https://github.com/ehog/razerpad/issues/2))
 - Reports of whether other Razer cooling hardware answers the same protocol

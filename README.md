@@ -1,6 +1,6 @@
-# razerpad-mac
+# razerpad
 
-[![build](https://github.com/ehog/razerpad-mac/actions/workflows/build.yml/badge.svg)](https://github.com/ehog/razerpad-mac/actions/workflows/build.yml)
+[![build](https://github.com/ehog/razerpad/actions/workflows/build.yml/badge.svg)](https://github.com/ehog/razerpad/actions/workflows/build.yml)
 
 Automatic fan-speed regulation **and Chroma lighting control** for the
 **Razer Laptop Cooling Pad** on macOS and Linux (see [Linux](#linux)). Replicates what Razer Synapse does on
